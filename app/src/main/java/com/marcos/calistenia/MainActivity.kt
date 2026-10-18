@@ -126,7 +126,7 @@ class MainActivity : ComponentActivity() {
     Chart(mine.groupBy { it.day }.toSortedMap().map { (_, l) -> l.maxOf { it.value }.toFloat() })
 }
 
-@Composable fun Weight(vm: VM) {
+@Composable fun ColumnScope.Weight(vm: VM) {
     val ws by vm.w.collectAsState(); var kg by remember { mutableStateOf("") }
     val ctx = LocalContext.current
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u ->
