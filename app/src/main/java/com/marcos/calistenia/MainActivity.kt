@@ -37,6 +37,28 @@ class VM(app: Application) : AndroidViewModel(app) {
     fun addSet(s: SetEntry) = viewModelScope.launch { d.addSet(s); Widgets.refresh(getApplication()) }
     fun del(s: SetEntry) = viewModelScope.launch { d.delSet(s); Widgets.refresh(getApplication()) }
     fun putW(day: Long, kg: Float) = viewModelScope.launch { d.putW(BodyWeight(day, kg)); Widgets.refresh(getApplication()) }
+    fun import(txt: String, done: (Boolean) -> Unit) = viewModelScope.launch {
+        done(runCatching {
+            val o = JSONObject(txt); val map = HashMap<Long, Long>(); val cur = ex.value.toMutableList()
+            val oe = o.getJSONArray("ejercicios")
+            for (i in 0 until oe.length()) {
+                val e = oe.getJSONObject(i); val n = e.getString("nombre"); val t = e.getBoolean("tiempo")
+                val id = cur.find { it.name == n }?.id ?: d.addEx(Exercise(name = n, isTime = t)).also { cur.add(Exercise(it, n, t)) }
+                map[e.getLong("id")] = id
+            }
+            val have = sets.value.map { listOf(it.exerciseId, it.day, it.value, it.extraKg, it.note) }.toMutableSet()
+            val os = o.getJSONArray("sets")
+            for (i in 0 until os.length()) {
+                val s = os.getJSONObject(i); val eid = map[s.getLong("ejercicioId")] ?: continue
+                val day = LocalDate.parse(s.getString("fecha")).toEpochDay(); val v = s.getInt("valor")
+                val kg = s.getDouble("kgExtra").toFloat(); val nt = s.getString("nota")
+                if (have.add(listOf(eid, day, v, kg, nt))) d.addSet(SetEntry(exerciseId = eid, day = day, value = v, extraKg = kg, note = nt))
+            }
+            val ow = o.getJSONArray("pesoCorporal")
+            for (i in 0 until ow.length()) { val w = ow.getJSONObject(i); d.putW(BodyWeight(LocalDate.parse(w.getString("fecha")).toEpochDay(), w.getDouble("kg").toFloat())) }
+            Widgets.refresh(getApplication())
+        }.isSuccess)
+    }
     fun json(): String = JSONObject()
         .put("ejercicios", JSONArray(ex.value.map { JSONObject().put("id", it.id).put("nombre", it.name).put("tiempo", it.isTime) }))
         .put("sets", JSONArray(sets.value.map { JSONObject().put("ejercicioId", it.exerciseId).put("fecha", LocalDate.ofEpochDay(it.day).toString())
@@ -139,7 +161,13 @@ class MainActivity : ComponentActivity() {
     ws.lastOrNull()?.let { Text("Último: ${it.kg} kg (${LocalDate.ofEpochDay(it.day)})", Modifier.padding(top = 8.dp)) }
     Chart(ws.map { it.kg })
     Spacer(Modifier.weight(1f))
-    OutlinedButton({ save.launch("calistenia.json") }, Modifier.fillMaxWidth()) { Text("Exportar datos (JSON)") }
+    val load = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        u?.let { val t = ctx.contentResolver.openInputStream(it)?.bufferedReader()?.use { r -> r.readText() }
+            if (t != null) vm.import(t) { ok -> android.widget.Toast.makeText(ctx, if (ok) "Datos importados" else "Archivo no válido", android.widget.Toast.LENGTH_SHORT).show() } } }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton({ save.launch("calistenia.json") }, Modifier.weight(1f)) { Text("Exportar JSON") }
+        OutlinedButton({ load.launch(arrayOf("*/*")) }, Modifier.weight(1f)) { Text("Importar JSON") }
+    }
 }
 
 @Composable fun DayBar(day: Long, set: (Long) -> Unit) {

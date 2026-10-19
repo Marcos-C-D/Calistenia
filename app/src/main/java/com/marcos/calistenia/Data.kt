@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.Flow
     @Query("SELECT * FROM Exercise ORDER BY name") fun exercises(): Flow<List<Exercise>>
     @Query("SELECT * FROM SetEntry ORDER BY ts") fun sets(): Flow<List<SetEntry>>
     @Query("SELECT * FROM BodyWeight ORDER BY day") fun weights(): Flow<List<BodyWeight>>
-    @Insert suspend fun addEx(e: Exercise)
+    @Insert suspend fun addEx(e: Exercise): Long
     @Insert suspend fun addSet(s: SetEntry)
     @Delete suspend fun delSet(s: SetEntry)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putW(w: BodyWeight)
