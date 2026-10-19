@@ -29,14 +29,14 @@ import org.json.JSONObject
 import java.time.LocalDate
 
 class VM(app: Application) : AndroidViewModel(app) {
-    private val d = Room.databaseBuilder(app, DB::class.java, "cal.db").build().d()
+    private val d = Db.get(app)
     val ex = d.exercises().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val sets = d.sets().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val w = d.weights().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun addEx(n: String, t: Boolean) = viewModelScope.launch { d.addEx(Exercise(name = n, isTime = t)) }
-    fun addSet(s: SetEntry) = viewModelScope.launch { d.addSet(s) }
-    fun del(s: SetEntry) = viewModelScope.launch { d.delSet(s) }
-    fun putW(kg: Float) = viewModelScope.launch { d.putW(BodyWeight(LocalDate.now().toEpochDay(), kg)) }
+    fun addSet(s: SetEntry) = viewModelScope.launch { d.addSet(s); Widgets.refresh(getApplication()) }
+    fun del(s: SetEntry) = viewModelScope.launch { d.delSet(s); Widgets.refresh(getApplication()) }
+    fun putW(day: Long, kg: Float) = viewModelScope.launch { d.putW(BodyWeight(day, kg)); Widgets.refresh(getApplication()) }
     fun json(): String = JSONObject()
         .put("ejercicios", JSONArray(ex.value.map { JSONObject().put("id", it.id).put("nombre", it.name).put("tiempo", it.isTime) }))
         .put("sets", JSONArray(sets.value.map { JSONObject().put("ejercicioId", it.exerciseId).put("fecha", LocalDate.ofEpochDay(it.day).toString())
@@ -54,9 +54,10 @@ class MainActivity : ComponentActivity() {
 
 @Composable fun App(vm: VM) {
     var tab by remember { mutableIntStateOf(0) }
+    var day by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
     Scaffold(bottomBar = { NavigationBar { listOf("Entreno", "Progreso", "Peso").forEachIndexed { i, t ->
         NavigationBarItem(tab == i, { tab = i }, {}, label = { Text(t) }) } } }) { p ->
-        Column(Modifier.padding(p).padding(16.dp).statusBarsPadding()) { when (tab) { 0 -> Train(vm); 1 -> Stats(vm); else -> Weight(vm) } }
+        Column(Modifier.padding(p).padding(16.dp).statusBarsPadding()) { if (tab != 1) DayBar(day) { day = it }; when (tab) { 0 -> Train(vm, day); 1 -> Stats(vm); else -> Weight(vm, day) } }
     }
 }
 
@@ -67,13 +68,12 @@ class MainActivity : ComponentActivity() {
 @Composable fun Chips(l: List<Exercise>, sel: Exercise?, on: (Exercise) -> Unit) =
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(l) { FilterChip(sel?.id == it.id, { on(it) }, { Text(it.name) }) } }
 
-@Composable fun Train(vm: VM) {
+@Composable fun Train(vm: VM, today: Long) {
     val exs by vm.ex.collectAsState(); val all by vm.sets.collectAsState()
     var sel by remember { mutableStateOf<Exercise?>(null) }
     val cur = exs.find { it.id == sel?.id } ?: exs.firstOrNull()
     var dlg by remember { mutableStateOf(false) }
     var v by remember { mutableStateOf("") }; var kg by remember { mutableStateOf("") }; var note by remember { mutableStateOf("") }
-    val today = LocalDate.now().toEpochDay()
     Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
         Box(Modifier.weight(1f)) { Chips(exs, cur) { sel = it } }
         TextButton({ dlg = true }) { Text("+ Ejercicio") }
@@ -88,7 +88,7 @@ class MainActivity : ComponentActivity() {
         Button({ v.toIntOrNull()?.let { vm.addSet(SetEntry(exerciseId = cur.id, day = today, value = it, extraKg = kg.toFloatOrNull() ?: 0f, note = note)); v = ""; note = "" } },
             Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("Añadir set") }
     }
-    Text("Hoy", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.titleMedium)
+    Text("Sets del ${LocalDate.ofEpochDay(today)}", Modifier.padding(top = 16.dp), style = MaterialTheme.typography.titleMedium)
     LazyColumn { items(all.filter { it.day == today }.reversed()) { s ->
         val e = exs.find { it.id == s.exerciseId }
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -126,18 +126,29 @@ class MainActivity : ComponentActivity() {
     Chart(mine.groupBy { it.day }.toSortedMap().map { (_, l) -> l.maxOf { it.value }.toFloat() })
 }
 
-@Composable fun ColumnScope.Weight(vm: VM) {
+@Composable fun ColumnScope.Weight(vm: VM, day: Long) {
     val ws by vm.w.collectAsState(); var kg by remember { mutableStateOf("") }
     val ctx = LocalContext.current
     val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { u ->
         u?.let { ctx.contentResolver.openOutputStream(it)?.use { o -> o.write(vm.json().toByteArray()) } } }
     Text("Peso corporal", style = MaterialTheme.typography.titleMedium)
     Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-        F(kg, "Kg de hoy", Modifier.weight(1f)) { kg = it }
-        Button({ kg.toFloatOrNull()?.let { vm.putW(it); kg = "" } }) { Text("Guardar") }
+        F(kg, "Kg del día", Modifier.weight(1f)) { kg = it }
+        Button({ kg.toFloatOrNull()?.let { vm.putW(day, it); kg = "" } }) { Text("Guardar") }
     }
     ws.lastOrNull()?.let { Text("Último: ${it.kg} kg (${LocalDate.ofEpochDay(it.day)})", Modifier.padding(top = 8.dp)) }
     Chart(ws.map { it.kg })
     Spacer(Modifier.weight(1f))
     OutlinedButton({ save.launch("calistenia.json") }, Modifier.fillMaxWidth()) { Text("Exportar datos (JSON)") }
+}
+
+@Composable fun DayBar(day: Long, set: (Long) -> Unit) {
+    val c = LocalContext.current
+    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        TextButton({ set(day - 1) }) { Text("◀") }
+        OutlinedButton({ val d = LocalDate.ofEpochDay(day)
+            android.app.DatePickerDialog(c, { _, y, m, dd -> set(LocalDate.of(y, m + 1, dd).toEpochDay()) }, d.year, d.monthValue - 1, d.dayOfMonth).show() }) { Text(LocalDate.ofEpochDay(day).toString()) }
+        TextButton({ set(day + 1) }) { Text("▶") }
+        TextButton({ set(LocalDate.now().toEpochDay()) }) { Text("Hoy") }
+    }
 }
