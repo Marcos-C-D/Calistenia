@@ -14,6 +14,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
@@ -34,6 +35,7 @@ class VM(app: Application) : AndroidViewModel(app) {
     val sets = d.sets().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     val w = d.weights().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun addEx(n: String, t: Boolean) = viewModelScope.launch { d.addEx(Exercise(name = n, isTime = t)) }
+    fun delEx(e: Exercise) = viewModelScope.launch { d.delSetsOf(e.id); d.delEx(e); Widgets.refresh(getApplication()) }
     fun addSet(s: SetEntry) = viewModelScope.launch { d.addSet(s); Widgets.refresh(getApplication()) }
     fun del(s: SetEntry) = viewModelScope.launch { d.delSet(s); Widgets.refresh(getApplication()) }
     fun putW(day: Long, kg: Float) = viewModelScope.launch { d.putW(BodyWeight(day, kg)); Widgets.refresh(getApplication()) }
@@ -77,9 +79,9 @@ class MainActivity : ComponentActivity() {
 @Composable fun App(vm: VM) {
     var tab by remember { mutableIntStateOf(0) }
     var day by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
-    Scaffold(bottomBar = { NavigationBar { listOf("Entreno", "Progreso", "Peso").forEachIndexed { i, t ->
+    Scaffold(bottomBar = { NavigationBar { listOf("Entreno", "Progreso", "Peso", "Todos").forEachIndexed { i, t ->
         NavigationBarItem(tab == i, { tab = i }, {}, label = { Text(t) }) } } }) { p ->
-        Column(Modifier.padding(p).padding(16.dp).statusBarsPadding()) { if (tab != 1) DayBar(day) { day = it }; when (tab) { 0 -> Train(vm, day); 1 -> Stats(vm); else -> Weight(vm, day) } }
+        Column(Modifier.padding(p).padding(16.dp).statusBarsPadding()) { if (tab == 0 || tab == 2) DayBar(day) { day = it }; when (tab) { 0 -> Train(vm, day); 1 -> Stats(vm); 2 -> Weight(vm, day); else -> All(vm) } }
     }
 }
 
@@ -95,11 +97,17 @@ class MainActivity : ComponentActivity() {
     var sel by remember { mutableStateOf<Exercise?>(null) }
     val cur = exs.find { it.id == sel?.id } ?: exs.firstOrNull()
     var dlg by remember { mutableStateOf(false) }
+    var del by remember { mutableStateOf(false) }
     var v by remember { mutableStateOf("") }; var kg by remember { mutableStateOf("") }; var note by remember { mutableStateOf("") }
     Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
         Box(Modifier.weight(1f)) { Chips(exs, cur) { sel = it } }
         TextButton({ dlg = true }) { Text("+ Ejercicio") }
     }
+    if (cur != null) TextButton({ del = true }) { Text("Eliminar ejercicio") }
+    if (del && cur != null) AlertDialog({ del = false },
+        confirmButton = { TextButton({ vm.delEx(cur); del = false; sel = null }) { Text("Eliminar") } },
+        dismissButton = { TextButton({ del = false }) { Text("Cancelar") } },
+        title = { Text("¿Eliminar ${cur.name}?") }, text = { Text("Se borrarán también todos sus sets.") })
     if (cur == null) { Text("Crea tu primer ejercicio con \"+ Ejercicio\"", Modifier.padding(top = 24.dp)); }
     else {
         Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -179,4 +187,18 @@ class MainActivity : ComponentActivity() {
         TextButton({ set(day + 1) }) { Text("▶") }
         TextButton({ set(LocalDate.now().toEpochDay()) }) { Text("Hoy") }
     }
+}
+
+@Composable fun All(vm: VM) {
+    val ex by vm.ex.collectAsState(); val sets by vm.sets.collectAsState(); val ws by vm.w.collectAsState()
+    val opts = listOf("w" to "Peso") + ex.map { "e${it.id}" to it.name }
+    var off by remember { mutableStateOf(setOf<String>()) }
+    val ser = buildSeries(ex, sets, ws, opts.map { it.first }.filter { it !in off }) { id -> opts.indexOfFirst { it.first == id } }
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) { items(opts) { (k, n) ->
+        FilterChip(k !in off, { off = if (k in off) off - k else off + k }, {
+            Row { Text("●", color = androidx.compose.ui.graphics.Color(PAL[opts.indexOfFirst { it.first == k } % PAL.size])); Text(" $n") } }) } }
+    Text("Cada línea va a su propia escala (mín–máx)", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.bodySmall)
+    val bmp = remember(ser) { android.graphics.Bitmap.createBitmap(900, 500, android.graphics.Bitmap.Config.ARGB_8888).also {
+        drawChart(android.graphics.Canvas(it), 900, 500, ser, legend = false, bg = false) } }
+    androidx.compose.foundation.Image(bmp.asImageBitmap(), null, Modifier.fillMaxWidth().padding(top = 16.dp))
 }
