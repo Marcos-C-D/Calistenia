@@ -14,6 +14,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
@@ -36,6 +39,7 @@ class VM(app: Application) : AndroidViewModel(app) {
     val w = d.weights().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
     fun addEx(n: String, t: Boolean) = viewModelScope.launch { d.addEx(Exercise(name = n, isTime = t)) }
     fun delEx(e: Exercise) = viewModelScope.launch { d.delSetsOf(e.id); d.delEx(e); Widgets.refresh(getApplication()) }
+    fun upEx(e: Exercise) = viewModelScope.launch { d.upEx(e); Widgets.refresh(getApplication()) }
     fun addSet(s: SetEntry) = viewModelScope.launch { d.addSet(s); Widgets.refresh(getApplication()) }
     fun del(s: SetEntry) = viewModelScope.launch { d.delSet(s); Widgets.refresh(getApplication()) }
     fun putW(day: Long, kg: Float) = viewModelScope.launch { d.putW(BodyWeight(day, kg)); Widgets.refresh(getApplication()) }
@@ -94,16 +98,21 @@ class MainActivity : ComponentActivity() {
 
 @Composable fun Train(vm: VM, today: Long) {
     val exs by vm.ex.collectAsState(); val all by vm.sets.collectAsState()
+    val since = LocalDate.now().toEpochDay() - 30
+    val fr = all.filter { it.day >= since }.groupingBy { it.exerciseId }.eachCount()
+    val vis = exs.filter { !it.hidden }.sortedWith(compareByDescending<Exercise> { fr[it.id] ?: 0 }.thenBy { it.name.lowercase() })
     var sel by remember { mutableStateOf<Exercise?>(null) }
-    val cur = exs.find { it.id == sel?.id } ?: exs.firstOrNull()
+    val cur = vis.find { it.id == sel?.id } ?: vis.firstOrNull()
     var dlg by remember { mutableStateOf(false) }
     var del by remember { mutableStateOf(false) }
+    var manage by remember { mutableStateOf(false) }
     var v by remember { mutableStateOf("") }; var kg by remember { mutableStateOf("") }; var note by remember { mutableStateOf("") }
     Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-        Box(Modifier.weight(1f)) { Chips(exs, cur) { sel = it } }
+        Box(Modifier.weight(1f)) { Picker(vis, cur) { sel = it } }
         TextButton({ dlg = true }) { Text("+ Ejercicio") }
     }
-    if (cur != null) TextButton({ del = true }) { Text("Eliminar ejercicio") }
+    TextButton({ manage = true }) { Text("Gestionar ejercicios") }
+    if (manage) Manage(vm) { manage = false }
     if (del && cur != null) AlertDialog({ del = false },
         confirmButton = { TextButton({ vm.delEx(cur); del = false; sel = null }) { Text("Eliminar") } },
         dismissButton = { TextButton({ del = false }) { Text("Cancelar") } },
@@ -148,12 +157,20 @@ class MainActivity : ComponentActivity() {
     var sel by remember { mutableStateOf<Exercise?>(null) }
     val cur = exs.find { it.id == sel?.id } ?: exs.firstOrNull() ?: run { Text("Sin ejercicios todavía"); return }
     val mine = all.filter { it.exerciseId == cur.id }
+    var selDay by remember(cur.id) { mutableStateOf<Long?>(null) }
+    val u = if (cur.isTime) "s" else "reps"
     Chips(exs, cur) { sel = it }
     val pr = mine.maxWithOrNull(compareBy({ it.extraKg }, { it.value }))
-    Text(if (pr == null) "Sin registros" else "PR: ${pr.value}${if (cur.isTime) " s" else " reps"}${if (pr.extraKg > 0) " con +${pr.extraKg}kg" else ""} (${LocalDate.ofEpochDay(pr.day)})",
-        Modifier.padding(top = 16.dp), style = MaterialTheme.typography.titleMedium)
-    Text("Mejor set por día", Modifier.padding(top = 8.dp))
-    Chart(mine.groupBy { it.day }.toSortedMap().map { (_, l) -> l.maxOf { it.value }.toFloat() })
+    Text(if (pr == null) "Sin registros" else "PR: ${pr.value} $u${if (pr.extraKg > 0) " con +${pr.extraKg}kg" else ""} (${LocalDate.ofEpochDay(pr.day)})",
+        Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleMedium)
+    val p = mine.groupBy { it.day }.toSortedMap().map { (k, l) -> k to l.maxOf { it.value }.toFloat() }
+    Text("Mejor set por día · toca un punto", style = MaterialTheme.typography.bodySmall)
+    ProgChart(p, p.indexOfFirst { it.first == selDay }, u) { selDay = p[it].first }
+    selDay?.let { d ->
+        Text(LocalDate.ofEpochDay(d).toString(), Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleSmall)
+        LazyColumn { items(mine.filter { it.day == d }.sortedBy { it.ts }.withIndex().toList()) { (i, st) ->
+            Text("Set ${i + 1}: ${st.value} $u${if (st.extraKg > 0) " +${st.extraKg}kg" else ""}${if (st.note.isNotBlank()) " · ${st.note}" else ""}") } }
+    }
 }
 
 @Composable fun ColumnScope.Weight(vm: VM, day: Long) {
@@ -201,4 +218,67 @@ class MainActivity : ComponentActivity() {
     val bmp = remember(ser) { android.graphics.Bitmap.createBitmap(900, 500, android.graphics.Bitmap.Config.ARGB_8888).also {
         drawChart(android.graphics.Canvas(it), 900, 500, ser, legend = false, bg = false) } }
     androidx.compose.foundation.Image(bmp.asImageBitmap(), null, Modifier.fillMaxWidth().padding(top = 16.dp))
+}
+
+fun px(p: List<Pair<Long, Float>>, i: Int, l: Float, w: Float): Float {
+    val sp = (p.last().first - p[0].first).toFloat()
+    return if (sp <= 0f) l + w / 2 else l + w * (p[i].first - p[0].first) / sp
+}
+
+@Composable fun ProgChart(p: List<Pair<Long, Float>>, sel: Int, unit: String, onSel: (Int) -> Unit) {
+    if (p.isEmpty()) { Text("Sin datos", Modifier.padding(top = 16.dp)); return }
+    val c = MaterialTheme.colorScheme.primary; val c2 = MaterialTheme.colorScheme.tertiary
+    val L = 110f; val R = 30f; val T = 30f; val B = 60f
+    Canvas(Modifier.fillMaxWidth().height(260.dp).padding(top = 8.dp).pointerInput(p) {
+        detectTapGestures { o -> val w = size.width - L - R
+            onSel(p.indices.minByOrNull { Math.abs(px(p, it, L, w) - o.x) }!!) } }) {
+        val w = size.width - L - R; val h = size.height - T - B
+        var mn = p.minOf { it.second }; var mx = p.maxOf { it.second }
+        if (mx - mn < 1f) { mn -= 1f; mx += 1f }
+        val tp = android.graphics.Paint().apply { color = 0xFFBBBBBB.toInt(); textSize = 28f; isAntiAlias = true }
+        val nc = drawContext.canvas.nativeCanvas
+        for (k in 0..4) { val v = mn + (mx - mn) * k / 4; val y = T + h * (1 - k / 4f)
+            drawLine(androidx.compose.ui.graphics.Color(0x33FFFFFF), androidx.compose.ui.geometry.Offset(L, y), androidx.compose.ui.geometry.Offset(L + w, y), 1f)
+            nc.drawText(if (v % 1f == 0f) v.toInt().toString() else "%.1f".format(v), 4f, y + 10f, tp) }
+        nc.drawText(unit, 4f, 22f, tp)
+        val pts = p.indices.map { androidx.compose.ui.geometry.Offset(px(p, it, L, w), T + h * (1 - (p[it].second - mn) / (mx - mn))) }
+        for (i in 1 until pts.size) drawLine(c, pts[i - 1], pts[i], 4f)
+        pts.forEachIndexed { i, o -> drawCircle(if (i == sel) c2 else c, if (i == sel) 14f else 7f, o) }
+        if (sel in pts.indices) drawLine(c2, androidx.compose.ui.geometry.Offset(pts[sel].x, T), androidx.compose.ui.geometry.Offset(pts[sel].x, T + h), 2f)
+        val idx = listOf(0, p.size / 2, p.size - 1).distinct()
+        idx.forEach { i -> val s = LocalDate.ofEpochDay(p[i].first).let { "${it.dayOfMonth}/${it.monthValue}" }
+            nc.drawText(s, pts[i].x - tp.measureText(s) / 2, size.height - 12f, tp) }
+    }
+}
+
+@Composable fun Picker(l: List<Exercise>, cur: Exercise?, on: (Exercise) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    OutlinedButton({ open = true }) { Text((cur?.name ?: "Sin ejercicios") + " ▾", maxLines = 1) }
+    if (open) { var q by remember { mutableStateOf("") }
+        AlertDialog({ open = false }, confirmButton = { TextButton({ open = false }) { Text("Cerrar") } }, title = { Text("Ejercicio") },
+            text = { Column { F(q, "Buscar", Modifier.fillMaxWidth(), false) { q = it }
+                LazyColumn(Modifier.heightIn(max = 320.dp)) { items(l.filter { it.name.contains(q, true) }) { e ->
+                    TextButton({ on(e); open = false }, Modifier.fillMaxWidth()) { Text(e.name) } } } } }) }
+}
+
+@Composable fun Manage(vm: VM, close: () -> Unit) {
+    val exs by vm.ex.collectAsState()
+    var ren by remember { mutableStateOf<Exercise?>(null) }; var del by remember { mutableStateOf<Exercise?>(null) }
+    androidx.compose.ui.window.Dialog(close, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize()) { Column(Modifier.statusBarsPadding().padding(16.dp)) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Text("Gestionar ejercicios", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium); TextButton(close) { Text("Cerrar") } }
+            LazyColumn { items(exs.sortedWith(compareBy({ it.hidden }, { it.name.lowercase() }))) { e ->
+                Column(Modifier.padding(vertical = 6.dp)) {
+                    Text(e.name + if (e.hidden) " (oculto)" else "")
+                    Row { TextButton({ ren = e }) { Text("Renombrar") }
+                        TextButton({ vm.upEx(e.copy(hidden = !e.hidden)) }) { Text(if (e.hidden) "Mostrar" else "Ocultar") }
+                        TextButton({ del = e }) { Text("Eliminar") } } } } }
+        } }
+    }
+    ren?.let { e -> var n by remember(e.id) { mutableStateOf(e.name) }
+        AlertDialog({ ren = null }, confirmButton = { TextButton({ if (n.isNotBlank()) { vm.upEx(e.copy(name = n.trim())); ren = null } }) { Text("Guardar") } },
+            dismissButton = { TextButton({ ren = null }) { Text("Cancelar") } }, title = { Text("Renombrar") }, text = { F(n, "Nombre", num = false) { n = it } }) }
+    del?.let { e -> AlertDialog({ del = null }, confirmButton = { TextButton({ vm.delEx(e); del = null }) { Text("Eliminar") } },
+        dismissButton = { TextButton({ del = null }) { Text("Cancelar") } }, title = { Text("¿Eliminar ${e.name}?") }, text = { Text("Se borrarán también todos sus sets.") }) }
 }

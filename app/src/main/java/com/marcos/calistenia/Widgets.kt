@@ -14,10 +14,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
+val M12 = object : androidx.room.migration.Migration(1, 2) {
+    override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) { db.execSQL("ALTER TABLE Exercise ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0") }
+}
 object Db {
     @Volatile private var i: D? = null
     fun get(c: Context): D = i ?: synchronized(this) {
-        i ?: Room.databaseBuilder(c.applicationContext, DB::class.java, "cal.db").build().d().also { i = it } }
+        i ?: Room.databaseBuilder(c.applicationContext, DB::class.java, "cal.db").addMigrations(M12).build().d().also { i = it } }
 }
 fun prefs(c: Context) = c.getSharedPreferences("wid", 0)
 fun idsOf(c: Context, id: Int) = prefs(c).getString("w$id", "")!!.split(",").filter { it.isNotBlank() }
